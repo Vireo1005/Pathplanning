@@ -3,17 +3,26 @@
 #include "PathPlanning.h"
 #include "PathPlanningDlg.h"
 #include "afxdialogex.h"
+#include <set>
+#include <queue>
+#include <stack>
+#include <functional>
+#include <utility>
+#include <algorithm>
+#include <climits>
+#include <cmath>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
 
-// CPathPlanningDlg 对话框
-
 CPathPlanningDlg::CPathPlanningDlg(CWnd* pParent /*=nullptr*/)
     : CDialogEx(IDD_PATHPLANNING_DIALOG, pParent)
     , m_nRows(10)
     , m_nCols(10)
+    , m_nFloors(3)
+    , m_nCurFloor(0)
+    , m_nGoalCount(3)
     , m_bHasPath(false)
     , m_editMode(MODE_NONE)
     , m_nRobotIndex(0)
@@ -21,8 +30,18 @@ CPathPlanningDlg::CPathPlanningDlg(CWnd* pParent /*=nullptr*/)
     , m_nTimerID(0)
     , m_nSpeed(200)
     , m_cellSize(30)
+    , m_startFloor(0)
+    , m_nStepPerTick(1)
+    , m_bDynEnabled(true)
+    , m_wpIndex(0)
+    , m_bWaiting(false)
+    , m_bAccelerated(false)
+    , m_nNormalSpeed(150)   // 与默认移动速度一致
 {
     m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
+    m_start = Point(0, 0);
+    m_elevator = Point(m_nRows - 1, m_nCols - 1);
+    m_robotPos.floor = 0; m_robotPos.x = 0; m_robotPos.y = 0;
 }
 
 void CPathPlanningDlg::DoDataExchange(CDataExchange* pDX)
@@ -30,8 +49,12 @@ void CPathPlanningDlg::DoDataExchange(CDataExchange* pDX)
     CDialogEx::DoDataExchange(pDX);
     DDX_Text(pDX, IDC_EDIT_ROWS, m_nRows);
     DDX_Text(pDX, IDC_EDIT_COLS, m_nCols);
-    DDV_MinMaxInt(pDX, m_nRows, 3, 30);
-    DDV_MinMaxInt(pDX, m_nCols, 3, 30);
+    DDV_MinMaxInt(pDX, m_nRows, 3, 50);
+    DDV_MinMaxInt(pDX, m_nCols, 3, 50);
+    DDX_Text(pDX, IDC_EDIT_FLOORS, m_nFloors);
+    DDV_MinMaxInt(pDX, m_nFloors, 1, 10);
+    DDX_Text(pDX, IDC_EDIT_GOALCOUNT, m_nGoalCount);
+    DDV_MinMaxInt(pDX, m_nGoalCount, 1, 5);
     DDX_Control(pDX, IDC_CMB_ALGORITHM, m_cmbAlgorithm);
 }
 
@@ -43,39 +66,48 @@ BEGIN_MESSAGE_MAP(CPathPlanningDlg, CDialogEx)
     ON_BN_CLICKED(IDC_BTN_OBSTACLE, &CPathPlanningDlg::OnBnClickedBtnObstacle)
     ON_BN_CLICKED(IDC_BTN_ERASE, &CPathPlanningDlg::OnBnClickedBtnErase)
     ON_BN_CLICKED(IDC_BTN_CLEAR, &CPathPlanningDlg::OnBnClickedBtnClear)
-    ON_BN_CLICKED(IDC_BTN_START, &CPathPlanningDlg::OnBnClickedBtnStart)
     ON_BN_CLICKED(IDC_BTN_END, &CPathPlanningDlg::OnBnClickedBtnEnd)
     ON_BN_CLICKED(IDC_BTN_SEARCH, &CPathPlanningDlg::OnBnClickedBtnSearch)
     ON_BN_CLICKED(IDC_BTN_MOVE, &CPathPlanningDlg::OnBnClickedBtnMove)
     ON_BN_CLICKED(IDC_BTN_STOP, &CPathPlanningDlg::OnBnClickedBtnStop)
+    ON_BN_CLICKED(IDC_BTN_RANDOM, &CPathPlanningDlg::OnBnClickedBtnRandom)
+    ON_BN_CLICKED(IDC_BTN_PREVFLOOR, &CPathPlanningDlg::OnBnClickedBtnPrevFloor)
+    ON_BN_CLICKED(IDC_BTN_NEXTFLOOR, &CPathPlanningDlg::OnBnClickedBtnNextFloor)
+    ON_BN_CLICKED(IDC_BTN_START, &CPathPlanningDlg::OnBnClickedBtnStart)
+    ON_BN_CLICKED(IDC_BTN_ELEVATOR, &CPathPlanningDlg::OnBnClickedBtnElevator)
+    ON_BN_CLICKED(IDC_BTN_ACCELERATE, &CPathPlanningDlg::OnBnClickedBtnAccelerate)
     ON_WM_LBUTTONDOWN()
     ON_WM_MOUSEMOVE()
     ON_WM_TIMER()
+    ON_WM_ERASEBKGND()
+    ON_STN_CLICKED(IDC_STATIC_COLS, &CPathPlanningDlg::OnStnClickedStaticCols)
 END_MESSAGE_MAP()
-
-// CPathPlanningDlg 初始化
 
 BOOL CPathPlanningDlg::OnInitDialog()
 {
     CDialogEx::OnInitDialog();
-
-    // 设置图标
+    ModifyStyle(0, WS_CLIPCHILDREN);
     SetIcon(m_hIcon, TRUE);
     SetIcon(m_hIcon, FALSE);
 
-    // 初始化算法下拉框
     m_cmbAlgorithm.AddString(_T("BFS 广度优先"));
     m_cmbAlgorithm.AddString(_T("A* 算法"));
+    m_cmbAlgorithm.AddString(_T("Dijkstra 算法"));
+    m_cmbAlgorithm.AddString(_T("DFS 深度优先"));
     m_cmbAlgorithm.SetCurSel(0);
 
-    // 初始化地图
-    m_planner.SetMapSize(m_nRows, m_nCols);
-    m_planner.SetStart(0, 0);
-    m_planner.SetEnd(m_nRows - 1, m_nCols - 1);
+    m_floors.clear();
+    m_floors.resize(m_nFloors);
+    for (int f = 0; f < m_nFloors; f++)
+        m_floors[f].SetMapSize(m_nRows, m_nCols);
 
-    // 计算地图布局
+    m_start = Point(0, 0);
+    m_startFloor = 0;
+    m_elevator = Point(m_nRows - 1, m_nCols - 1);
+    m_goals.clear();
     CalcMapLayout();
-
+    // InitDynObstacles();   ← 删除这一行，改为首次移动时生成
+    SetDlgItemText(IDC_STATIC_STATUS, _T("已初始化，当前第 1 层"));
     return TRUE;
 }
 
@@ -84,96 +116,83 @@ void CPathPlanningDlg::OnSysCommand(UINT nID, LPARAM lParam)
     CDialogEx::OnSysCommand(nID, lParam);
 }
 
-// 计算地图布局
+Point CPathPlanningDlg::GetElevator()
+{
+    return m_elevator;
+}
+
 void CPathPlanningDlg::CalcMapLayout()
 {
     CRect clientRect;
     GetClientRect(&clientRect);
 
-    // 地图区域：左边留出控制面板宽度
     int panelWidth = 200;
     int margin = 20;
-
     int mapWidth = clientRect.Width() - panelWidth - margin * 2;
     int mapHeight = clientRect.Height() - margin * 2;
 
-    // 计算单元格大小
     int cellW = mapWidth / m_nCols;
     int cellH = mapHeight / m_nRows;
     m_cellSize = min(cellW, cellH);
     if (m_cellSize < 10) m_cellSize = 10;
 
-    // 地图实际大小
     int actualW = m_cellSize * m_nCols;
     int actualH = m_cellSize * m_nRows;
 
-    // 居中显示
     int left = panelWidth + margin + (mapWidth - actualW) / 2;
     int top = margin + (mapHeight - actualH) / 2;
-
     m_mapRect.SetRect(left, top, left + actualW, top + actualH);
 }
 
-// 屏幕坐标转网格坐标
 CPoint CPathPlanningDlg::ScreenToGrid(CPoint point)
 {
-    if (!m_mapRect.PtInRect(point)) {
-        return CPoint(-1, -1);
-    }
+    if (!m_mapRect.PtInRect(point)) return CPoint(-1, -1);
     int row = (point.y - m_mapRect.top) / m_cellSize;
     int col = (point.x - m_mapRect.left) / m_cellSize;
     return CPoint(row, col);
 }
 
-// 网格坐标转屏幕坐标
 CPoint CPathPlanningDlg::GridToScreen(int row, int col)
 {
-    return CPoint(
-        m_mapRect.left + col * m_cellSize,
-        m_mapRect.top + row * m_cellSize
-    );
+    return CPoint(m_mapRect.left + col * m_cellSize,
+        m_mapRect.top + row * m_cellSize);
 }
 
-// 绘制地图
 void CPathPlanningDlg::DrawMap(CDC* pDC)
 {
     DrawGrid(pDC);
     DrawObstacles(pDC);
+    DrawElevator(pDC);
     DrawPath(pDC);
     DrawStartEnd(pDC);
     DrawRobot(pDC);
+    DrawDynamic(pDC);   // 动态障碍画在最上层
 }
 
-// 绘制网格
 void CPathPlanningDlg::DrawGrid(CDC* pDC)
 {
     CPen pen(PS_SOLID, 1, RGB(200, 200, 200));
     CPen* oldPen = pDC->SelectObject(&pen);
 
-    // 绘制横线
     for (int i = 0; i <= m_nRows; i++) {
         int y = m_mapRect.top + i * m_cellSize;
         pDC->MoveTo(m_mapRect.left, y);
         pDC->LineTo(m_mapRect.right, y);
     }
-
-    // 绘制竖线
     for (int j = 0; j <= m_nCols; j++) {
         int x = m_mapRect.left + j * m_cellSize;
         pDC->MoveTo(x, m_mapRect.top);
         pDC->LineTo(x, m_mapRect.bottom);
     }
-
     pDC->SelectObject(oldPen);
 }
 
-// 绘制障碍物
 void CPathPlanningDlg::DrawObstacles(CDC* pDC)
 {
     CBrush brush(RGB(100, 100, 100));
     CBrush* oldBrush = pDC->SelectObject(&brush);
 
-    const auto& map = m_planner.GetMap();
+    const auto& map = m_floors[m_nCurFloor].GetMap();
     for (int i = 0; i < m_nRows; i++) {
         for (int j = 0; j < m_nCols; j++) {
             if (map[i][j]) {
@@ -182,110 +201,213 @@ void CPathPlanningDlg::DrawObstacles(CDC* pDC)
             }
         }
     }
-
     pDC->SelectObject(oldBrush);
 }
 
-// 绘制起点和终点
 void CPathPlanningDlg::DrawStartEnd(CDC* pDC)
 {
-    Point start = m_planner.GetStart();
-    Point end = m_planner.GetEnd();
-
-    // 起点 - 绿色
-    CBrush startBrush(RGB(0, 200, 0));
-    CBrush* oldBrush = pDC->SelectObject(&startBrush);
-    CPoint startPos = GridToScreen(start.x, start.y);
-    pDC->Rectangle(startPos.x, startPos.y, startPos.x + m_cellSize, startPos.y + m_cellSize);
-
-    // 终点 - 红色
-    CBrush endBrush(RGB(255, 80, 80));
-    pDC->SelectObject(&endBrush);
-    CPoint endPos = GridToScreen(end.x, end.y);
-    pDC->Rectangle(endPos.x, endPos.y, endPos.x + m_cellSize, endPos.y + m_cellSize);
-
-    pDC->SelectObject(oldBrush);
-
-    // 标注文字
     pDC->SetBkMode(TRANSPARENT);
-    pDC->SetTextColor(RGB(255, 255, 255));
-
     CFont font;
-    font.CreatePointFont(80, _T("Arial"));
+    font.CreatePointFont(90, _T("Arial"));
     CFont* oldFont = pDC->SelectObject(&font);
 
-    pDC->TextOutW(startPos.x + m_cellSize / 4, startPos.y + m_cellSize / 4, _T("S"));
-    pDC->TextOutW(endPos.x + m_cellSize / 4, endPos.y + m_cellSize / 4, _T("E"));
+    if (m_nCurFloor == m_startFloor) {
+        CBrush b(RGB(0, 200, 0));
+        CBrush* ob = pDC->SelectObject(&b);
+        CPoint p = GridToScreen(m_start.x, m_start.y);
+        pDC->Rectangle(p.x, p.y, p.x + m_cellSize, p.y + m_cellSize);
+        pDC->SelectObject(ob);
+        pDC->SetTextColor(RGB(255, 255, 255));
+        pDC->TextOutW(p.x + m_cellSize / 4, p.y + m_cellSize / 4, _T("S"));
+    }
 
+    CBrush eb(RGB(255, 80, 80));
+    CBrush* ob = pDC->SelectObject(&eb);
+    for (size_t i = 0; i < m_goals.size(); i++) {
+        if (m_goals[i].floor != m_nCurFloor) continue;
+        CPoint p = GridToScreen(m_goals[i].x, m_goals[i].y);
+        pDC->Rectangle(p.x, p.y, p.x + m_cellSize, p.y + m_cellSize);
+        pDC->SetTextColor(RGB(255, 255, 255));
+        CString t;
+        t.Format(_T("%d"), (int)i + 1);
+        pDC->TextOutW(p.x + m_cellSize / 4, p.y + m_cellSize / 4, t);
+    }
+    pDC->SelectObject(ob);
     pDC->SelectObject(oldFont);
 }
 
-// 绘制路径
-void CPathPlanningDlg::DrawPath(CDC* pDC)
+void CPathPlanningDlg::DrawElevator(CDC* pDC)
 {
-    if (!m_bHasPath || m_path.empty()) return;
+    Point elev = GetElevator();
+    CBrush b(RGB(150, 80, 220));
+    CBrush* ob = pDC->SelectObject(&b);
+    CPoint p = GridToScreen(elev.x, elev.y);
+    pDC->Rectangle(p.x, p.y, p.x + m_cellSize, p.y + m_cellSize);
+    pDC->SelectObject(ob);
 
-    CPen pen(PS_SOLID, 3, RGB(255, 200, 0));
-    CPen* oldPen = pDC->SelectObject(&pen);
-
-    // 绘制路径连线
-    for (size_t i = 0; i < m_path.size() - 1; i++) {
-        CPoint p1 = GridToScreen(m_path[i].x, m_path[i].y);
-        CPoint p2 = GridToScreen(m_path[i + 1].x, m_path[i + 1].y);
-
-        pDC->MoveTo(p1.x + m_cellSize / 2, p1.y + m_cellSize / 2);
-        pDC->LineTo(p2.x + m_cellSize / 2, p2.y + m_cellSize / 2);
-    }
-
-    pDC->SelectObject(oldPen);
+    pDC->SetBkMode(TRANSPARENT);
+    pDC->SetTextColor(RGB(255, 255, 255));
+    CFont font;
+    font.CreatePointFont(80, _T("Arial"));
+    CFont* of = pDC->SelectObject(&font);
+    pDC->TextOutW(p.x + m_cellSize / 5, p.y + m_cellSize / 4, _T("电"));
+    pDC->SelectObject(of);
 }
 
-// 绘制机器人
+COLORREF CPathPlanningDlg::LegColor(int leg)
+{
+    static const COLORREF pal[6] = {
+        RGB(255, 140, 0),   // 橙
+        RGB(0,   170, 0),   // 绿
+        RGB(0,   120, 255), // 蓝
+        RGB(200, 0,   200), // 紫
+        RGB(210, 170, 0),   // 黄
+        RGB(0,   170, 170)  // 青
+    };
+    return pal[(leg % 6 + 6) % 6];
+}
+
+void CPathPlanningDlg::DrawArrowHead(CDC* pDC, CPoint from, CPoint to)
+{
+    const double PI = 3.14159265358979;
+    double ang = atan2((double)(to.y - from.y), (double)(to.x - from.x));
+    int len = m_cellSize / 3;
+    if (len < 4)
+        len = 4;
+    double a1 = ang + PI - PI / 6.0;
+    double a2 = ang + PI + PI / 6.0;
+    CPoint w1(to.x + (int)(len * cos(a1)), to.y + (int)(len * sin(a1)));
+    CPoint w2(to.x + (int)(len * cos(a2)), to.y + (int)(len * sin(a2)));
+    pDC->MoveTo(to); pDC->LineTo(w1);
+    pDC->MoveTo(to); pDC->LineTo(w2);
+}
+
+void CPathPlanningDlg::DrawPath(CDC* pDC)
+{
+    // 不画原始 m_fullPath，改为画"已走路径 + 前方实时路径"
+    // 机器人始终在两条路径的衔接点上
+
+    // --- 1. 画已走路径（实线，深色） ---
+    if (m_traveledPath.size() >= 2) {
+        CPen pen(PS_SOLID, 3, RGB(0, 120, 255));  // 蓝色实线 = 已走过
+        CPen* oldPen = pDC->SelectObject(&pen);
+
+        for (size_t i = 0; i + 1 < m_traveledPath.size(); i++) {
+            const PathNode& a = m_traveledPath[i];
+            const PathNode& b = m_traveledPath[i + 1];
+            if (a.floor != m_nCurFloor || b.floor != m_nCurFloor) continue;
+
+            CPoint p1 = GridToScreen(a.x, a.y);
+            CPoint p2 = GridToScreen(b.x, b.y);
+            CPoint c1(p1.x + m_cellSize / 2, p1.y + m_cellSize / 2);
+            CPoint c2(p2.x + m_cellSize / 2, p2.y + m_cellSize / 2);
+            pDC->MoveTo(c1);
+            pDC->LineTo(c2);
+        }
+        pDC->SelectObject(oldPen);
+    }
+
+    // --- 2. 画前方实时路径（虚线，浅色，表示即将走的路） ---
+    if (m_aheadPath.size() >= 2) {
+        CPen pen(PS_DASH, 2, RGB(255, 140, 0));  // 橙色虚线 = 前方规划
+        CPen* oldPen = pDC->SelectObject(&pen);
+
+        for (size_t i = 0; i + 1 < m_aheadPath.size(); i++) {
+            const PathNode& a = m_aheadPath[i];
+            const PathNode& b = m_aheadPath[i + 1];
+            if (a.floor != m_nCurFloor || b.floor != m_nCurFloor) continue;
+
+            CPoint p1 = GridToScreen(a.x, a.y);
+            CPoint p2 = GridToScreen(b.x, b.y);
+            CPoint c1(p1.x + m_cellSize / 2, p1.y + m_cellSize / 2);
+            CPoint c2(p2.x + m_cellSize / 2, p2.y + m_cellSize / 2);
+            pDC->MoveTo(c1);
+            pDC->LineTo(c2);
+        }
+        pDC->SelectObject(oldPen);
+    }
+}
+
 void CPathPlanningDlg::DrawRobot(CDC* pDC)
 {
-    if (!m_bHasPath || m_path.empty()) return;
+    if (!m_bHasPath) return;
+    if (m_robotPos.floor != m_nCurFloor) return;
 
-    int idx = m_bRobotMoving ? m_nRobotIndex : 0;
-    if (idx >= (int)m_path.size()) idx = (int)m_path.size() - 1;
-
-    Point pos = m_path[idx];
-    CPoint screenPos = GridToScreen(pos.x, pos.y);
-
-    // 绘制圆形机器人 - 蓝色
-    CBrush brush(RGB(0, 120, 255));
+    // 等待时用灰色，正常用蓝色
+    CBrush brush(m_bWaiting ? RGB(150, 150, 150) : RGB(0, 120, 255));
     CBrush* oldBrush = pDC->SelectObject(&brush);
-
+    CPoint sp = GridToScreen(m_robotPos.x, m_robotPos.y);
     int radius = m_cellSize / 3;
-    int cx = screenPos.x + m_cellSize / 2;
-    int cy = screenPos.y + m_cellSize / 2;
-
+    int cx = sp.x + m_cellSize / 2;
+    int cy = sp.y + m_cellSize / 2;
     pDC->Ellipse(cx - radius, cy - radius, cx + radius, cy + radius);
-
     pDC->SelectObject(oldBrush);
 }
 
-// 绘制消息
+// 画所有在当前层的动态障碍（不画路线，只画障碍本身）
+void CPathPlanningDlg::DrawDynamic(CDC* pDC)
+{
+    if (!m_bDynEnabled) return;
+    for (auto& ob : m_dynObs) {
+        if (!ob.active) continue;
+        if (ob.floor != m_nCurFloor) continue;
+
+        CPoint sp = GridToScreen(ob.pos.x, ob.pos.y);
+        int cx = sp.x + m_cellSize / 2;
+        int cy = sp.y + m_cellSize / 2;
+        int radius = m_cellSize / 3;
+
+        CBrush brush(RGB(220, 30, 30));            // 深红圆
+        CBrush* obp = pDC->SelectObject(&brush);
+        pDC->Ellipse(cx - radius, cy - radius, cx + radius, cy + radius);
+        pDC->SelectObject(obp);
+
+        CPen pen(PS_SOLID, 2, RGB(255, 255, 255)); // 白色 X
+        CPen* op = pDC->SelectObject(&pen);
+        int d = radius / 2;
+        pDC->MoveTo(cx - d, cy - d); pDC->LineTo(cx + d, cy + d);
+        pDC->MoveTo(cx + d, cy - d); pDC->LineTo(cx - d, cy + d);
+        pDC->SelectObject(op);
+    }
+}
+
 void CPathPlanningDlg::OnPaint()
 {
     if (IsIconic())
     {
         CPaintDC dc(this);
         SendMessage(WM_ICONERASEBKGND, reinterpret_cast<WPARAM>(dc.GetSafeHdc()), 0);
-
         int cxIcon = GetSystemMetrics(SM_CXICON);
         int cyIcon = GetSystemMetrics(SM_CYICON);
         CRect rect;
         GetClientRect(&rect);
         int x = (rect.Width() - cxIcon + 1) / 2;
         int y = (rect.Height() - cyIcon + 1) / 2;
-
         dc.DrawIcon(x, y, m_hIcon);
     }
     else
     {
         CPaintDC dc(this);
         CalcMapLayout();
-        DrawMap(&dc);
+
+        CDC memDC;
+        CBitmap memBmp;
+        CRect clientRect;
+        GetClientRect(&clientRect);
+
+        memDC.CreateCompatibleDC(&dc);
+        memBmp.CreateCompatibleBitmap(&dc, clientRect.Width(), clientRect.Height());
+        CBitmap* pOldBmp = memDC.SelectObject(&memBmp);
+
+        memDC.FillSolidRect(&clientRect, GetSysColor(COLOR_3DFACE));
+        DrawMap(&memDC);
+
+        dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &memDC, 0, 0, SRCCOPY);
+
+        memDC.SelectObject(pOldBmp);
+        memBmp.DeleteObject();
+        memDC.DeleteDC();
+
         CDialogEx::OnPaint();
     }
 }
@@ -295,124 +417,451 @@ HCURSOR CPathPlanningDlg::OnQueryDragIcon()
     return static_cast<HCURSOR>(m_hIcon);
 }
 
-// 创建地图按钮
+bool CPathPlanningDlg::FindPathOnFloor(int floor, Point s, Point e, vector<Point>& path, int algo)
+{
+    path.clear();
+    if (floor < 0 || floor >= m_nFloors) return false;
+
+    const auto& map = m_floors[floor].GetMap();
+    int R = m_nRows, C = m_nCols;
+
+    if (s.x < 0 || s.x >= R || s.y < 0 || s.y >= C) return false;
+    if (e.x < 0 || e.x >= R || e.y < 0 || e.y >= C) return false;
+    if (map[s.x][s.y] || map[e.x][e.y]) return false;
+
+    vector<vector<bool>>  visited(R, vector<bool>(C, false));
+    vector<vector<Point>> parent(R, vector<Point>(C, Point(-1, -1)));
+    int dx[4] = { -1, 1, 0, 0 };
+    int dy[4] = { 0, 0, -1, 1 };
+    bool found = false;
+
+    if (algo == 0) {
+        std::queue<Point> q;
+        q.push(s);
+        visited[s.x][s.y] = true;
+        while (!q.empty()) {
+            Point cur = q.front(); q.pop();
+            if (cur == e) { found = true; break; }
+            for (int d = 0; d < 4; d++) {
+                int nx = cur.x + dx[d], ny = cur.y + dy[d];
+                if (nx < 0 || nx >= R || ny < 0 || ny >= C) continue;
+                if (visited[nx][ny] || map[nx][ny]) continue;
+                visited[nx][ny] = true;
+                parent[nx][ny] = cur;
+                q.push(Point(nx, ny));
+            }
+        }
+    }
+    else if (algo == 3) {
+        std::stack<Point> st;
+        st.push(s);
+        visited[s.x][s.y] = true;
+        while (!st.empty()) {
+            Point cur = st.top(); st.pop();
+            if (cur == e) { found = true; break; }
+            for (int d = 0; d < 4; d++) {
+                int nx = cur.x + dx[d], ny = cur.y + dy[d];
+                if (nx < 0 || nx >= R || ny < 0 || ny >= C) continue;
+                if (visited[nx][ny] || map[nx][ny]) continue;
+                visited[nx][ny] = true;
+                parent[nx][ny] = cur;
+                st.push(Point(nx, ny));
+            }
+        }
+    }
+    else {
+        vector<vector<int>> g(R, vector<int>(C, INT_MAX));
+        typedef std::pair<int, int> PQItem;
+        std::priority_queue<PQItem, vector<PQItem>, std::greater<PQItem>> pq;
+
+        g[s.x][s.y] = 0;
+        int h0 = (algo == 1) ? (abs(s.x - e.x) + abs(s.y - e.y)) : 0;
+        pq.push(std::make_pair(h0, s.x * C + s.y));
+
+        while (!pq.empty()) {
+            int code = pq.top().second; pq.pop();
+            Point cur(code / C, code % C);
+            if (visited[cur.x][cur.y]) continue;
+            visited[cur.x][cur.y] = true;
+            if (cur == e) { found = true; break; }
+            for (int d = 0; d < 4; d++) {
+                int nx = cur.x + dx[d], ny = cur.y + dy[d];
+                if (nx < 0 || nx >= R || ny < 0 || ny >= C) continue;
+                if (map[nx][ny] || visited[nx][ny]) continue;
+                int ng = g[cur.x][cur.y] + 1;
+                if (ng < g[nx][ny]) {
+                    g[nx][ny] = ng;
+                    parent[nx][ny] = cur;
+                    int h = (algo == 1) ? (abs(nx - e.x) + abs(ny - e.y)) : 0;
+                    pq.push(std::make_pair(ng + h, nx * C + ny));
+                }
+            }
+        }
+    }
+
+    if (!found) return false;
+
+    vector<Point> rev;
+    Point cur = e;
+    while (!(cur == s)) {
+        rev.push_back(cur);
+        cur = parent[cur.x][cur.y];
+    }
+    rev.push_back(s);
+    for (int i = (int)rev.size() - 1; i >= 0; i--)
+        path.push_back(rev[i]);
+    return true;
+}
+
+bool CPathPlanningDlg::GetSegmentPath(const PathNode& a, const PathNode& b, vector<PathNode>& seg, int algo)
+{
+    seg.clear();
+    Point pa(a.x, a.y), pb(b.x, b.y);
+
+    if (a.floor == b.floor) {
+        vector<Point> p;
+        if (!FindPathOnFloor(a.floor, pa, pb, p, algo)) return false;
+        for (auto& q : p) {
+            PathNode n; n.floor = a.floor; n.x = q.x; n.y = q.y;
+            seg.push_back(n);
+        }
+        return true;
+    }
+    else {
+        Point elev = GetElevator();
+        vector<Point> p1, p2;
+        if (!FindPathOnFloor(a.floor, pa, elev, p1, algo)) return false;
+        if (!FindPathOnFloor(b.floor, elev, pb, p2, algo)) return false;
+        for (auto& q : p1) {
+            PathNode n; n.floor = a.floor; n.x = q.x; n.y = q.y;
+            seg.push_back(n);
+        }
+        for (auto& q : p2) {
+            PathNode n; n.floor = b.floor; n.x = q.x; n.y = q.y;
+            seg.push_back(n);
+        }
+        return true;
+    }
+}
+
+bool CPathPlanningDlg::PlanRoute(int algo)
+{
+    m_fullPath.clear();
+
+    int N = (int)m_goals.size();
+    if (N == 0) return false;
+
+    vector<PathNode> pts;
+    PathNode sp; sp.floor = m_startFloor; sp.x = m_start.x; sp.y = m_start.y;
+    pts.push_back(sp);
+    for (auto& g : m_goals) {
+        PathNode n; n.floor = g.floor; n.x = g.x; n.y = g.y;
+        pts.push_back(n);
+    }
+
+    int total = N + 1;
+    vector<vector<int>> dist(total, vector<int>(total, -1));
+    for (int i = 0; i < total; i++) {
+        for (int j = 0; j < total; j++) {
+            if (i == j) { dist[i][j] = 0; continue; }
+            vector<PathNode> seg;
+            if (GetSegmentPath(pts[i], pts[j], seg, algo))
+                dist[i][j] = (int)seg.size() - 1;
+            else
+                dist[i][j] = -1;
+        }
+    }
+
+    vector<int> order(N);
+    for (int i = 0; i < N; i++) order[i] = i + 1;
+
+    vector<int> bestOrder;
+    int bestCost = INT_MAX;
+    do {
+        int cost = 0;
+        bool ok = true;
+        int prev = 0;
+        for (int k = 0; k < N; k++) {
+            int cur = order[k];
+            if (dist[prev][cur] < 0) { ok = false; break; }
+            cost += dist[prev][cur];
+            prev = cur;
+        }
+        if (ok && dist[prev][0] >= 0) {
+            cost += dist[prev][0];
+            if (cost < bestCost) {
+                bestCost = cost;
+                bestOrder = order;
+            }
+        }
+    } while (std::next_permutation(order.begin(), order.end()));
+
+    if (bestOrder.empty()) return false;
+
+    // 生成机器人必经关键点序列：起点 -> 各终点 -> 起点
+    m_waypoints.clear();
+    {
+        PathNode s0; s0.floor = m_startFloor; s0.x = m_start.x; s0.y = m_start.y;
+        m_waypoints.push_back(s0);
+        for (int v : bestOrder)
+            m_waypoints.push_back(pts[v]);
+        m_waypoints.push_back(s0);
+    }
+
+    vector<int> tour;
+    tour.push_back(0);
+    for (int v : bestOrder) tour.push_back(v);
+    tour.push_back(0);
+
+    m_legOf.clear();
+    for (size_t k = 0; k + 1 < tour.size(); k++) {
+        vector<PathNode> seg;
+        GetSegmentPath(pts[tour[k]], pts[tour[k + 1]], seg, algo);
+        size_t startIdx = (k == 0) ? 0 : 1;
+        for (size_t s2 = startIdx; s2 < seg.size(); s2++) {
+            m_fullPath.push_back(seg[s2]);
+            m_legOf.push_back((int)k);
+        }
+    }
+    return true;
+}
+
+void CPathPlanningDlg::ToggleGoal(int floor, int r, int c)
+{
+    Point elev = GetElevator();
+    if (floor == m_startFloor && r == m_start.x && c == m_start.y) return;
+    if (r == elev.x && c == elev.y) return;
+    if (m_floors[floor].GetMap()[r][c]) return;
+
+    for (size_t i = 0; i < m_goals.size(); i++) {
+        if (m_goals[i].floor == floor && m_goals[i].x == r && m_goals[i].y == c) {
+            m_goals.erase(m_goals.begin() + i);
+            m_bHasPath = false;
+            m_fullPath.clear();
+            return;
+        }
+    }
+
+    if ((int)m_goals.size() >= m_nGoalCount) {
+        MessageBox(_T("终点数量已达上限，请先移除或增大终点数量！"), _T("提示"), MB_ICONWARNING);
+        return;
+    }
+    GoalPoint g;
+    g.floor = floor; g.x = r; g.y = c;
+    m_goals.push_back(g);
+    m_bHasPath = false;
+    m_fullPath.clear();
+}
+
 void CPathPlanningDlg::OnBnClickedBtnCreate()
 {
     UpdateData(TRUE);
-
-    if (m_nRows < 3 || m_nRows > 30 || m_nCols < 3 || m_nCols > 30) {
-        MessageBox(_T("行列数必须在3-30之间！"), _T("提示"), MB_ICONWARNING);
+    if (m_nRows < 3 || m_nRows > 50 || m_nCols < 3 || m_nCols > 50) {
+        MessageBox(_T("行列数必须在3-50之间！"), _T("提示"), MB_ICONWARNING);
+        return;
+    }
+    if (m_nFloors < 1 || m_nFloors > 10) {
+        MessageBox(_T("楼层数必须在1-10之间！"), _T("提示"), MB_ICONWARNING);
+        return;
+    }
+    if (m_nGoalCount < 1 || m_nGoalCount > 5) {
+        MessageBox(_T("终点数量必须在1-5之间！"), _T("提示"), MB_ICONWARNING);
         return;
     }
 
-    // 停止机器人
     if (m_bRobotMoving) {
         KillTimer(m_nTimerID);
         m_bRobotMoving = false;
     }
 
-    m_planner.SetMapSize(m_nRows, m_nCols);
-    m_planner.SetStart(0, 0);
-    m_planner.SetEnd(m_nRows - 1, m_nCols - 1);
+    m_bAccelerated = false;
+    m_nSpeed = 150;
+    m_nNormalSpeed = 150;
+
+    m_floors.clear();
+    m_floors.resize(m_nFloors);
+    for (int f = 0; f < m_nFloors; f++)
+        m_floors[f].SetMapSize(m_nRows, m_nCols);
+
+    m_nCurFloor = 0;
+    m_start = Point(0, 0);
+    m_startFloor = 0;
+    m_elevator = Point(m_nRows - 1, m_nCols - 1);
+    m_goals.clear();
+    m_fullPath.clear();
+    m_waypoints.clear();
+    m_wpIndex = 0;
+    m_bWaiting = false;
     m_bHasPath = false;
-    m_path.clear();
     m_editMode = MODE_NONE;
 
+    srand((unsigned)time(nullptr));
+
+    CalcMapLayout();
+    CString s;
+    s.Format(_T("已创建 %d 层地图，当前第 1 层"), m_nFloors);
+    SetDlgItemText(IDC_STATIC_STATUS, s);
     Invalidate();
 }
 
-// 绘制障碍物按钮
 void CPathPlanningDlg::OnBnClickedBtnObstacle()
 {
     m_editMode = MODE_OBSTACLE;
     SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：绘制障碍物"));
 }
 
-// 擦除障碍物按钮
 void CPathPlanningDlg::OnBnClickedBtnErase()
 {
     m_editMode = MODE_ERASE;
     SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：擦除障碍物"));
 }
 
-// 清除所有障碍物
 void CPathPlanningDlg::OnBnClickedBtnClear()
 {
-    m_planner.ClearObstacles();
+    m_floors[m_nCurFloor].ClearObstacles();
     m_bHasPath = false;
-    m_path.clear();
+    m_fullPath.clear();
     m_editMode = MODE_NONE;
-    SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：无"));
+    SetDlgItemText(IDC_STATIC_STATUS, _T("当前层障碍物已清除"));
     Invalidate();
 }
 
-// 设置起点按钮
 void CPathPlanningDlg::OnBnClickedBtnStart()
 {
     m_editMode = MODE_START;
-    SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：设置起点"));
+    SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：设置起点（在当前层点格子放置）"));
 }
 
-// 设置终点按钮
 void CPathPlanningDlg::OnBnClickedBtnEnd()
 {
-    m_editMode = MODE_END;
-    SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：设置终点"));
+    m_nGoalCount = GetDlgItemInt(IDC_EDIT_GOALCOUNT);
+    if (m_nGoalCount < 1) m_nGoalCount = 1;
+    if (m_nGoalCount > 5) m_nGoalCount = 5;
+    m_editMode = MODE_GOAL;
+    SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：设置终点（点格子添加/再点移除）"));
 }
 
-// 搜索路径按钮
+void CPathPlanningDlg::OnBnClickedBtnElevator()
+{
+    m_editMode = MODE_ELEVATOR;
+    SetDlgItemText(IDC_STATIC_STATUS, _T("当前模式：设置电梯"));
+}
+
+void CPathPlanningDlg::SetStartAt(int floor, int r, int c)
+{
+    if (r == m_elevator.x && c == m_elevator.y) return;
+    if (m_floors[floor].GetMap()[r][c]) return;
+    for (auto& g : m_goals)
+        if (g.floor == floor && g.x == r && g.y == c) return;
+
+    m_startFloor = floor;
+    m_start = Point(r, c);
+    m_bHasPath = false;
+    m_fullPath.clear();
+}
+
+void CPathPlanningDlg::SetElevatorAt(int r, int c)
+{
+    if (r == m_start.x && c == m_start.y) return;
+    for (auto& g : m_goals)
+        if (g.x == r && g.y == c) return;
+
+    for (int f = 0; f < m_nFloors; f++)
+        m_floors[f].SetObstacle(r, c, false);
+
+    m_elevator = Point(r, c);
+    m_bHasPath = false;
+    m_fullPath.clear();
+}
+
 void CPathPlanningDlg::OnBnClickedBtnSearch()
 {
-    // 停止机器人
     if (m_bRobotMoving) {
         KillTimer(m_nTimerID);
         m_bRobotMoving = false;
     }
 
+    if (m_goals.empty()) {
+        MessageBox(_T("请先设置至少一个终点！"), _T("提示"), MB_ICONWARNING);
+        return;
+    }
+
     int algo = m_cmbAlgorithm.GetCurSel();
-    bool success = false;
+    if (algo < 0) algo = 0;
 
-    if (algo == 0) {
-        success = m_planner.BFS(m_path);
-    }
-    else {
-        success = m_planner.AStar(m_path);
-    }
-
-    if (success) {
+    bool ok = PlanRoute(algo);
+    if (ok) {
         m_bHasPath = true;
-        m_nRobotIndex = 0;
+
+        m_robotPos.floor = m_startFloor;
+        m_robotPos.x = m_start.x;
+        m_robotPos.y = m_start.y;
+        m_wpIndex = 1;
+        m_bWaiting = false;
+
+        m_traveledPath.clear();
+        m_aheadPath.clear();
+
+        int steps = (int)m_fullPath.size() - 1;
+        CString algoName[4] = { _T("BFS"), _T("A*"), _T("Dijkstra"), _T("DFS") };
         CString msg;
-        msg.Format(_T("找到路径！共%d步"), (int)m_path.size() - 1);
+        msg.Format(_T("【%s】规划成功！访问 %d 个终点并返回起点，总步数：%d 步"),
+            (LPCTSTR)algoName[algo], (int)m_goals.size(), steps);
         SetDlgItemText(IDC_STATIC_STATUS, msg);
     }
     else {
         m_bHasPath = false;
-        m_path.clear();
-        SetDlgItemText(IDC_STATIC_STATUS, _T("无法到达终点！"));
-        MessageBox(_T("起点到终点之间没有可行路径！"), _T("提示"), MB_ICONWARNING);
+        m_fullPath.clear();
+        m_waypoints.clear();
+        SetDlgItemText(IDC_STATIC_STATUS, _T("存在无法到达的终点！"));
+        MessageBox(_T("无法在起点与所有终点之间规划出完整路径！"), _T("提示"), MB_ICONWARNING);
     }
-
     Invalidate();
 }
 
-// 开始移动按钮
 void CPathPlanningDlg::OnBnClickedBtnMove()
 {
-    if (!m_bHasPath || m_path.empty()) {
+    if (!m_bHasPath || m_waypoints.empty()) {
         MessageBox(_T("请先搜索路径！"), _T("提示"), MB_ICONWARNING);
         return;
     }
-
     if (m_bRobotMoving) return;
 
-    m_nRobotIndex = 0;
+    if (m_wpIndex < 1 || m_wpIndex >= (int)m_waypoints.size()) {
+        m_robotPos.floor = m_startFloor;
+        m_robotPos.x = m_start.x;
+        m_robotPos.y = m_start.y;
+        m_wpIndex = 1;
+    }
+
+    m_bWaiting = false;
+    m_nCurFloor = m_robotPos.floor;
+    srand((unsigned)time(nullptr));
+
+    // ===== 首次移动时才随机生成动态障碍 =====
+    // 如果层数变了（重新创建过地图），清空后重新生成
+    if (m_bDynEnabled) {
+        if ((int)m_dynObs.size() != m_nFloors) {
+            m_dynObs.clear();
+        }
+        if (m_dynObs.empty()) {
+            InitDynObstacles();
+        }
+    }
+
+    m_nSpeed = 150;
+    m_nNormalSpeed = 150;
+    m_bAccelerated = false;
+
+    m_traveledPath.clear();
+    m_aheadPath.clear();
+
     m_bRobotMoving = true;
-    m_nTimerID = SetTimer(1, m_nSpeed, nullptr);
+    m_nTimerID = (UINT)SetTimer(1, m_nSpeed, nullptr);
     SetDlgItemText(IDC_STATIC_STATUS, _T("机器人移动中..."));
+    Invalidate();
 }
 
-// 停止移动按钮
 void CPathPlanningDlg::OnBnClickedBtnStop()
 {
     if (m_bRobotMoving) {
@@ -423,45 +872,158 @@ void CPathPlanningDlg::OnBnClickedBtnStop()
     }
 }
 
-// 鼠标左键按下
+void CPathPlanningDlg::OnBnClickedBtnRandom()
+{
+    if (m_bRobotMoving) {
+        KillTimer(m_nTimerID);
+        m_bRobotMoving = false;
+    }
+
+    m_floors[m_nCurFloor].ClearObstacles();
+    m_bHasPath = false;
+    m_fullPath.clear();
+
+    Point elev = GetElevator();
+
+    // ---- 1. 收集本层需要连接的关键点 ----
+    std::vector<Point> targets;
+    if (m_nCurFloor == m_startFloor)              // 起点在本层
+        targets.push_back(m_start);
+    for (auto& g : m_goals)                       // 终点在本层
+        if (g.floor == m_nCurFloor)
+            targets.push_back(Point(g.x, g.y));
+
+    // ---- 2. 一次 BFS 找出电梯到所有关键点的最短路径，并保护路径格子 ----
+    std::set<std::pair<int, int>> protectedSet;
+    protectedSet.insert({ elev.x, elev.y });      // 电梯本身保护
+
+    int R = m_nRows, C = m_nCols;
+    std::vector<std::vector<bool>> visited(R, std::vector<bool>(C, false));
+    std::vector<std::vector<Point>> parent(R, std::vector<Point>(C, Point(-1, -1)));
+    std::queue<Point> q;
+    q.push(elev);
+    visited[elev.x][elev.y] = true;
+
+    // 目标集合，方便判断
+    std::set<std::pair<int, int>> targetSet;
+    for (auto& t : targets) targetSet.insert({ t.x, t.y });
+
+    int foundCount = 0;
+    int dx[4] = { -1, 1, 0, 0 };
+    int dy[4] = { 0, 0, -1, 1 };
+
+    while (!q.empty() && foundCount < (int)targets.size()) {
+        Point cur = q.front(); q.pop();
+        // 如果当前点是某个关键点，回溯路径加入保护集
+        if (targetSet.count({ cur.x, cur.y })) {
+            foundCount++;
+            Point p = cur;
+            while (!(p == elev)) {
+                protectedSet.insert({ p.x, p.y });
+                p = parent[p.x][p.y];
+            }
+        }
+        for (int d = 0; d < 4; d++) {
+            int nx = cur.x + dx[d], ny = cur.y + dy[d];
+            if (nx >= 0 && nx < R && ny >= 0 && ny < C && !visited[nx][ny]) {
+                visited[nx][ny] = true;
+                parent[nx][ny] = cur;
+                q.push(Point(nx, ny));
+            }
+        }
+    }
+
+    // 显式添加起点、终点本身（有些可能已在回溯中加入，但重复无妨）
+    for (auto& t : targets)
+        protectedSet.insert({ t.x, t.y });
+
+    // ---- 3. 随机放置障碍，避开保护集 ----
+    srand((unsigned)time(nullptr));
+    const double density = 0.25;
+    for (int r = 0; r < m_nRows; ++r) {
+        for (int c = 0; c < m_nCols; ++c) {
+            if (protectedSet.count({ r, c }) > 0)   // 保护集里的格子不放置障碍
+                continue;
+
+            // 额外的安全排除（理论上保护集已包含，但保留以防万一）
+            if (m_nCurFloor == m_startFloor && r == m_start.x && c == m_start.y) continue;
+            if (r == elev.x && c == elev.y) continue;
+            bool isGoal = false;
+            for (auto& g : m_goals)
+                if (g.floor == m_nCurFloor && g.x == r && g.y == c) { isGoal = true; break; }
+            if (isGoal) continue;
+
+            if ((double)rand() / RAND_MAX < density)
+                m_floors[m_nCurFloor].SetObstacle(r, c, true);
+        }
+    }
+
+    SetDlgItemText(IDC_STATIC_STATUS, _T("已随机生成障碍（保证连通）"));
+    Invalidate();
+}
+
+void CPathPlanningDlg::OnBnClickedBtnPrevFloor()
+{
+    if (m_nCurFloor > 0) {
+        m_nCurFloor--;
+        CString s;
+        s.Format(_T("当前第 %d 层"), m_nCurFloor + 1);
+        SetDlgItemText(IDC_STATIC_STATUS, s);
+        Invalidate();
+    }
+}
+
+void CPathPlanningDlg::OnBnClickedBtnNextFloor()
+{
+    if (m_nCurFloor < m_nFloors - 1) {
+        m_nCurFloor++;
+        CString s;
+        s.Format(_T("当前第 %d 层"), m_nCurFloor + 1);
+        SetDlgItemText(IDC_STATIC_STATUS, s);
+        Invalidate();
+    }
+}
+
 void CPathPlanningDlg::OnLButtonDown(UINT nFlags, CPoint point)
 {
-    if (m_editMode == MODE_NONE) return;
+    if (m_editMode == MODE_NONE) {
+        CDialogEx::OnLButtonDown(nFlags, point);
+        return;
+    }
 
     CPoint grid = ScreenToGrid(point);
-    if (grid.x < 0 || grid.y < 0) return;
+    if (grid.x < 0 || grid.y < 0) {
+        CDialogEx::OnLButtonDown(nFlags, point);
+        return;
+    }
+
+    int r = grid.x, c = grid.y;
+    Point elev = GetElevator();
 
     switch (m_editMode) {
     case MODE_OBSTACLE:
-        // 不能在起点终点上画障碍
-        if (!(Point(grid.x, grid.y) == m_planner.GetStart()) &&
-            !(Point(grid.x, grid.y) == m_planner.GetEnd())) {
-            m_planner.SetObstacle(grid.x, grid.y, true);
+        if (!(m_nCurFloor == m_startFloor && r == m_start.x && c == m_start.y) &&
+            !(r == elev.x && c == elev.y)) {
+            m_floors[m_nCurFloor].SetObstacle(r, c, true);
             m_bHasPath = false;
-            m_path.clear();
+            m_fullPath.clear();
         }
         break;
-
     case MODE_ERASE:
-        m_planner.SetObstacle(grid.x, grid.y, false);
+        m_floors[m_nCurFloor].SetObstacle(r, c, false);
         m_bHasPath = false;
-        m_path.clear();
+        m_fullPath.clear();
         break;
-
+    case MODE_GOAL:
+        ToggleGoal(m_nCurFloor, r, c);
+        break;
     case MODE_START:
-        if (!m_planner.GetMap()[grid.x][grid.y]) {
-            m_planner.SetStart(grid.x, grid.y);
-            m_bHasPath = false;
-            m_path.clear();
-        }
+        SetStartAt(m_nCurFloor, r, c);
         break;
-
-    case MODE_END:
-        if (!m_planner.GetMap()[grid.x][grid.y]) {
-            m_planner.SetEnd(grid.x, grid.y);
-            m_bHasPath = false;
-            m_path.clear();
-        }
+    case MODE_ELEVATOR:
+        SetElevatorAt(r, c);
+        break;
+    default:
         break;
     }
 
@@ -469,45 +1031,452 @@ void CPathPlanningDlg::OnLButtonDown(UINT nFlags, CPoint point)
     CDialogEx::OnLButtonDown(nFlags, point);
 }
 
-// 鼠标移动（拖拽绘制）
 void CPathPlanningDlg::OnMouseMove(UINT nFlags, CPoint point)
 {
-    if (!(nFlags & MK_LBUTTON)) return;
-    if (m_editMode != MODE_OBSTACLE && m_editMode != MODE_ERASE) return;
+    if (!(nFlags & MK_LBUTTON)) {
+        CDialogEx::OnMouseMove(nFlags, point);
+        return;
+    }
+    if (m_editMode != MODE_OBSTACLE && m_editMode != MODE_ERASE) {
+        CDialogEx::OnMouseMove(nFlags, point);
+        return;
+    }
 
     CPoint grid = ScreenToGrid(point);
-    if (grid.x < 0 || grid.y < 0) return;
+    if (grid.x < 0 || grid.y < 0) {
+        CDialogEx::OnMouseMove(nFlags, point);
+        return;
+    }
+
+    int r = grid.x, c = grid.y;
+    Point elev = GetElevator();
 
     if (m_editMode == MODE_OBSTACLE) {
-        if (!(Point(grid.x, grid.y) == m_planner.GetStart()) &&
-            !(Point(grid.x, grid.y) == m_planner.GetEnd())) {
-            m_planner.SetObstacle(grid.x, grid.y, true);
+        if (!(m_nCurFloor == m_startFloor && r == m_start.x && c == m_start.y) &&
+            !(r == elev.x && c == elev.y)) {
+            m_floors[m_nCurFloor].SetObstacle(r, c, true);
             m_bHasPath = false;
-            m_path.clear();
+            m_fullPath.clear();
         }
     }
-    else if (m_editMode == MODE_ERASE) {
-        m_planner.SetObstacle(grid.x, grid.y, false);
+    else {
+        m_floors[m_nCurFloor].SetObstacle(r, c, false);
         m_bHasPath = false;
-        m_path.clear();
+        m_fullPath.clear();
     }
 
     Invalidate();
     CDialogEx::OnMouseMove(nFlags, point);
 }
 
-// 定时器 - 机器人移动
 void CPathPlanningDlg::OnTimer(UINT_PTR nIDEvent)
 {
     if (nIDEvent == 1 && m_bRobotMoving) {
-        m_nRobotIndex++;
-        if (m_nRobotIndex >= (int)m_path.size()) {
+        StepDynamic();   // 1) 动态障碍先走一步
+        StepRobot();     // 2) 机器人根据新情况规划/等待
+
+        if (m_wpIndex >= (int)m_waypoints.size()) {
             KillTimer(m_nTimerID);
             m_bRobotMoving = false;
-            SetDlgItemText(IDC_STATIC_STATUS, _T("到达终点！"));
+            SetDlgItemText(IDC_STATIC_STATUS, _T("已完成所有终点并返回起点！"));
+        }
+        else {
+            m_nCurFloor = m_robotPos.floor;   // 跟随机器人所在层
+            if (m_bWaiting)
+                SetDlgItemText(IDC_STATIC_STATUS, _T("障碍挡路，等待中..."));
+            else
+                SetDlgItemText(IDC_STATIC_STATUS, _T("机器人移动中..."));
         }
         Invalidate();
     }
-
     CDialogEx::OnTimer(nIDEvent);
+}
+
+BOOL CPathPlanningDlg::OnEraseBkgnd(CDC* pDC)
+{
+    return TRUE;
+}
+
+void CPathPlanningDlg::OnStnClickedStaticCols()
+{
+    // TODO: 在此添加控件通知处理程序代码
+}
+
+// 按当前层数，创建"每层一个"动态障碍
+void CPathPlanningDlg::InitDynObstacles()
+{
+    m_dynObs.clear();
+    for (int f = 0; f < m_nFloors; f++) {
+        DynObstacle ob;
+        ob.floor = f;
+        ob.useDFS = (((f + 1) % 2) == 1);   // 第(f+1)层是奇数 -> DFS；偶数 -> 随机
+        ob.idx = 0;
+        SpawnOneDynamic(ob);
+        m_dynObs.push_back(ob);
+    }
+}
+
+// (重新)随机生成一个障碍：出生在本层某个空格
+void CPathPlanningDlg::SpawnOneDynamic(DynObstacle& ob)
+{
+    ob.active = true;
+    ob.path.clear();
+    ob.idx = 0;
+
+    int f = ob.floor;
+    Point elev = GetElevator();
+
+    Point spawn(-1, -1);
+    for (int t = 0; t < 200; t++) {
+        int r = rand() % m_nRows;
+        int c = rand() % m_nCols;
+        if (m_floors[f].GetMap()[r][c]) continue;
+        if (r == elev.x && c == elev.y) continue;
+        if (f == m_startFloor && r == m_start.x && c == m_start.y) continue;
+        bool isGoal = false;
+        for (auto& g : m_goals)
+            if (g.floor == f && g.x == r && g.y == c) { isGoal = true; break; }
+        if (isGoal) continue;
+        spawn = Point(r, c);
+        break;
+    }
+    if (spawn.x < 0) { ob.pos = elev; ob.last = elev; return; }  // 兜底
+
+    ob.pos = spawn;
+    ob.last = spawn;
+
+    // 奇数层：用 DFS 规划一条到"起点坐标"的路径
+    if (ob.useDFS) {
+        vector<Point> p;
+        Point target(m_start.x, m_start.y);
+        if (FindPathOnFloor(f, spawn, target, p, 3) && (int)p.size() >= 2) {
+            ob.path = p;
+            ob.idx = 0;
+        }
+        else {
+            ob.path.clear();                     // 无路 -> 本轮退化为随机游走
+        }
+    }
+}
+
+// 偶数层：随机游走一步，尽量不走回头路（覆盖更多格子）
+void CPathPlanningDlg::RandomWalkStep(DynObstacle& ob)
+{
+    int f = ob.floor;
+    const auto& map = m_floors[f].GetMap();
+    int dx[4] = { -1, 1, 0, 0 };
+    int dy[4] = { 0, 0, -1, 1 };
+
+    vector<Point> cand, pref;
+    for (int d = 0; d < 4; d++) {
+        int nx = ob.pos.x + dx[d], ny = ob.pos.y + dy[d];
+        if (nx < 0 || nx >= m_nRows || ny < 0 || ny >= m_nCols) continue;
+        if (map[nx][ny]) continue;
+        Point np(nx, ny);
+        cand.push_back(np);
+        if (!(np == ob.last)) pref.push_back(np);
+    }
+
+    Point next;
+    if (!pref.empty())      next = pref[rand() % pref.size()];
+    else if (!cand.empty()) next = cand[rand() % cand.size()];
+    else return;
+
+    ob.last = ob.pos;
+    ob.pos = next;
+}
+
+// 所有动态障碍各走一步
+void CPathPlanningDlg::StepDynamic()
+{
+    if (!m_bDynEnabled) return;
+    for (auto& ob : m_dynObs) {
+        // 1. 处理冷却状态
+        if (!ob.active) {
+            if (GetTickCount64() - ob.vanishTime >= 5000) {
+                SpawnOneDynamic(ob);   // 5秒到，重生
+            }
+            continue;   // 冷却中，不进行任何移动
+        }
+
+        // 2. 活跃状态下的移动（原代码，但到达终点改为消失）
+        if (ob.useDFS && (int)ob.path.size() >= 2) {
+            if (ob.idx + 1 < (int)ob.path.size()) {
+                ob.idx++;
+                ob.pos = ob.path[ob.idx];
+            }
+            else {
+                // 到达起点 --> 消失，开始冷却
+                ob.active = false;
+                ob.vanishTime = GetTickCount64();
+                ob.path.clear();
+                ob.idx = 0;
+            }
+        }
+        else {
+            RandomWalkStep(ob);   // 偶数层或奇数层无 DFS 路径
+        }
+    }
+}
+// 在某层上，从 s 到 e 规划一步，避开 blocked
+
+bool CPathPlanningDlg::PlanAvoidStep(int floor, Point s, Point e,const std::set<std::pair<int, int>>& blocked, Point& nextCell)
+{
+    if (s == e) { nextCell = s; return true; }
+
+    const auto& map = m_floors[floor].GetMap();
+    int R = m_nRows, C = m_nCols;
+    if (map[e.x][e.y]) return false;
+    if (blocked.count(std::make_pair(e.x, e.y)) > 0) return false;
+
+    vector<vector<bool>>  visited(R, vector<bool>(C, false));
+    vector<vector<Point>> parent(R, vector<Point>(C, Point(-1, -1)));
+    std::queue<Point> q;
+    q.push(s);
+    visited[s.x][s.y] = true;
+
+    int dx[4] = { -1, 1, 0, 0 };
+    int dy[4] = { 0, 0, -1, 1 };
+    bool found = false;
+
+    while (!q.empty()) {
+        Point cur = q.front(); q.pop();
+        if (cur == e) { found = true; break; }
+        for (int d = 0; d < 4; d++) {
+            int nx = cur.x + dx[d], ny = cur.y + dy[d];
+            if (nx < 0 || nx >= R || ny < 0 || ny >= C) continue;
+            if (visited[nx][ny] || map[nx][ny]) continue;
+            if (blocked.count(std::make_pair(nx, ny)) > 0) continue;
+            visited[nx][ny] = true;
+            parent[nx][ny] = cur;
+            q.push(Point(nx, ny));
+        }
+    }
+    if (!found) return false;
+
+    Point cur = e;
+    while (!(parent[cur.x][cur.y] == s)) {
+        cur = parent[cur.x][cur.y];
+        if (cur.x < 0) return false;
+    }
+    nextCell = cur;
+    return true;
+}
+
+// 规划从 s 到 e 的完整避障路径，返回整条路径（含起点终点）
+bool CPathPlanningDlg::PlanAheadFull(int floor, Point s, Point e,
+    const std::set<std::pair<int, int>>& blocked, vector<Point>& fullPath)
+{
+    fullPath.clear();
+    if (s == e) { fullPath.push_back(s); return true; }
+
+    const auto& map = m_floors[floor].GetMap();
+    int R = m_nRows, C = m_nCols;
+    if (map[e.x][e.y]) return false;
+    if (blocked.count(std::make_pair(e.x, e.y)) > 0) return false;
+
+    vector<vector<bool>>  visited(R, vector<bool>(C, false));
+    vector<vector<Point>> parent(R, vector<Point>(C, Point(-1, -1)));
+    std::queue<Point> q;
+    q.push(s);
+    visited[s.x][s.y] = true;
+
+    int dx[4] = { -1, 1, 0, 0 };
+    int dy[4] = { 0, 0, -1, 1 };
+    bool found = false;
+
+    while (!q.empty()) {
+        Point cur = q.front(); q.pop();
+        if (cur == e) { found = true; break; }
+        for (int d = 0; d < 4; d++) {
+            int nx = cur.x + dx[d], ny = cur.y + dy[d];
+            if (nx < 0 || nx >= R || ny < 0 || ny >= C) continue;
+            if (visited[nx][ny] || map[nx][ny]) continue;
+            if (blocked.count(std::make_pair(nx, ny)) > 0) continue;
+            visited[nx][ny] = true;
+            parent[nx][ny] = cur;
+            q.push(Point(nx, ny));
+        }
+    }
+
+    if (!found) return false;
+
+    // 回溯还原完整路径
+    vector<Point> rev;
+    Point cur = e;
+    while (!(cur == s)) {
+        rev.push_back(cur);
+        cur = parent[cur.x][cur.y];
+        if (cur.x < 0) return false;
+    }
+    rev.push_back(s);
+    for (int i = (int)rev.size() - 1; i >= 0; i--)
+        fullPath.push_back(rev[i]);
+
+    return true;
+}
+
+// 机器人反应式走一步：朝当前关键点前进，避开动态障碍；避不开则等待
+void CPathPlanningDlg::StepRobot()
+{
+    if (m_waypoints.empty()) return;
+    if (m_wpIndex >= (int)m_waypoints.size()) return;
+
+    PathNode tgt = m_waypoints[m_wpIndex];
+
+    // 到达当前关键点，切到下一个
+    if (m_robotPos.floor == tgt.floor && m_robotPos.x == tgt.x && m_robotPos.y == tgt.y) {
+        m_wpIndex++;
+        if (m_wpIndex >= (int)m_waypoints.size()) {
+            m_aheadPath.clear();
+            return;
+        }
+        tgt = m_waypoints[m_wpIndex];
+    }
+
+    Point elev = GetElevator();
+    Point subTarget;
+    bool switchedFloor = false;   // 本帧是否发生了楼层切换
+
+    if (m_robotPos.floor == tgt.floor) {
+        subTarget = Point(tgt.x, tgt.y);
+    }
+    else {
+        // 不在同一层，子目标是电梯
+        if (m_robotPos.x == elev.x && m_robotPos.y == elev.y) {
+            // 到达电梯 -> 切换楼层
+            PathNode node;
+            node.floor = m_robotPos.floor;
+            node.x = m_robotPos.x;
+            node.y = m_robotPos.y;
+            if (m_traveledPath.empty() ||
+                !(m_traveledPath.back().floor == node.floor &&
+                    m_traveledPath.back().x == node.x &&
+                    m_traveledPath.back().y == node.y)) {
+                m_traveledPath.push_back(node);
+            }
+            m_robotPos.floor = tgt.floor;
+            m_bWaiting = false;
+            switchedFloor = true;
+            // 不再 goto，后续跳过移动，直接在末尾更新显示路径
+        }
+        else {
+            subTarget = elev;
+        }
+    }
+
+    // 正常移动（非楼层切换帧）
+    if (!switchedFloor) {
+        // 收集动态障碍位置
+        std::set<std::pair<int, int>> blocked;
+        if (m_bDynEnabled) {
+            for (auto& ob : m_dynObs) {
+                if (!ob.active) continue;
+                if (ob.floor != m_robotPos.floor) continue;
+                blocked.insert(std::make_pair(ob.pos.x, ob.pos.y));
+                if (ob.useDFS && ob.idx + 1 < (int)ob.path.size())
+                    blocked.insert(std::make_pair(ob.path[ob.idx + 1].x, ob.path[ob.idx + 1].y));
+            }
+        }
+
+        Point cur(m_robotPos.x, m_robotPos.y);
+        Point nextCell;
+
+        if (PlanAvoidStep(m_robotPos.floor, cur, subTarget, blocked, nextCell)) {
+            // 移动前记录轨迹
+            PathNode node;
+            node.floor = m_robotPos.floor;
+            node.x = m_robotPos.x;
+            node.y = m_robotPos.y;
+            if (m_traveledPath.empty() ||
+                !(m_traveledPath.back().floor == node.floor &&
+                    m_traveledPath.back().x == node.x &&
+                    m_traveledPath.back().y == node.y)) {
+                m_traveledPath.push_back(node);
+            }
+
+            m_robotPos.x = nextCell.x;
+            m_robotPos.y = nextCell.y;
+            m_bWaiting = false;
+        }
+        else {
+            m_bWaiting = true;
+        }
+    }
+
+    // ========== 统一更新前方显示路径 ==========
+    m_aheadPath.clear();
+    if (m_wpIndex < (int)m_waypoints.size()) {
+        PathNode curTgt = m_waypoints[m_wpIndex];
+        Point sub;
+        int curFloor = m_robotPos.floor;
+
+        if (curFloor == curTgt.floor) {
+            sub = Point(curTgt.x, curTgt.y);
+        }
+        else {
+            sub = elev;
+        }
+
+        // 重新计算显示用的 blocked（不依赖可能未定义的局部变量）
+        std::set<std::pair<int, int>> blockedDisp;
+        if (m_bDynEnabled) {
+            for (auto& ob : m_dynObs) {
+                if (!ob.active) continue;
+                if (ob.floor != curFloor) continue;
+                blockedDisp.insert(std::make_pair(ob.pos.x, ob.pos.y));
+                if (ob.useDFS && ob.idx + 1 < (int)ob.path.size())
+                    blockedDisp.insert(std::make_pair(ob.path[ob.idx + 1].x, ob.path[ob.idx + 1].y));
+            }
+        }
+
+        vector<Point> fp;
+        Point curP(m_robotPos.x, m_robotPos.y);
+        if (PlanAheadFull(curFloor, curP, sub, blockedDisp, fp)) {
+            for (auto& p : fp) {
+                PathNode n;
+                n.floor = curFloor;
+                n.x = p.x;
+                n.y = p.y;
+                m_aheadPath.push_back(n);
+            }
+        }
+    }
+}
+
+void CPathPlanningDlg::OnBnClickedBtnAccelerate()
+{
+    const int MIN_SPEED = 30;
+
+    if (!m_bAccelerated)
+    {
+        // 保存当前正常速度（确保记录的是“非加速”状态的速度）
+        m_nNormalSpeed = m_nSpeed;
+        int newSpeed = m_nNormalSpeed / 3;
+        if (newSpeed < MIN_SPEED)
+            newSpeed = MIN_SPEED;
+        m_nSpeed = newSpeed;
+        m_bAccelerated = true;
+    }
+    else
+    {
+        // 恢复原来速度
+        m_nSpeed = m_nNormalSpeed;
+        m_bAccelerated = false;
+    }
+
+    // 如果机器人正在移动，需要重启定时器使新间隔生效
+    if (m_bRobotMoving && m_nTimerID != 0)
+    {
+        KillTimer(m_nTimerID);
+        m_nTimerID = (UINT)SetTimer(1, m_nSpeed, nullptr);
+    }
+
+    // 更新状态栏提示
+    CString msg;
+    if (m_bAccelerated)
+        msg.Format(_T("已加速 (间隔 %d ms) —— 再次点击恢复原速"), m_nSpeed);
+    else
+        msg.Format(_T("已恢复原速 (间隔 %d ms)"), m_nSpeed);
+    SetDlgItemText(IDC_STATIC_STATUS, msg);
 }

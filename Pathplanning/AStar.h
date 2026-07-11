@@ -11,6 +11,10 @@ struct Point {
     bool operator==(const Point& other) const {
         return x == other.x && y == other.y;
     }
+    bool operator<(const Point& other) const {
+        if (x != other.x) return x < other.x;
+        return y < other.y;
+    }
 };
 
 // A*算法节点
@@ -58,6 +62,9 @@ public:
 
     // A*算法搜索
     bool AStar(vector<Point>& path);
+
+    bool Dijkstra(vector<Point>& path);
+    bool DFS(vector<Point>& path);
 
     // 获取地图
     const vector<vector<bool>>& GetMap() const { return m_map; }
