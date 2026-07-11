@@ -334,9 +334,6 @@ void CPathPlanningDlg::OnPaint()
 
 HCURSOR CPathPlanningDlg::OnQueryDragIcon() { return static_cast<HCURSOR>(m_hIcon); }
 
-// ============================================================
-// 路径规划核心
-// ============================================================
 bool CPathPlanningDlg::FindPathOnFloor(int floor, Point s, Point e, vector<Point>& path, int algo)
 {
     path.clear();
@@ -496,9 +493,7 @@ bool CPathPlanningDlg::PlanRoute(int algo)
     return true;
 }
 
-// ============================================================
 // 编辑操作
-// ============================================================
 void CPathPlanningDlg::ToggleGoal(int floor, int r, int c)
 {
     Point elev = GetElevator();
@@ -540,9 +535,6 @@ void CPathPlanningDlg::SetElevatorAt(int r, int c)
     m_bHasPath = false; m_fullPath.clear();
 }
 
-// ============================================================
-// 按钮响应
-// ============================================================
 void CPathPlanningDlg::OnBnClickedBtnCreate()
 {
     UpdateData(TRUE);
@@ -840,11 +832,6 @@ void CPathPlanningDlg::OnTimer(UINT_PTR nIDEvent)
 BOOL CPathPlanningDlg::OnEraseBkgnd(CDC* pDC) { return TRUE; }
 void CPathPlanningDlg::OnStnClickedStaticCols() {}
 
-// ============================================================
-// 动态障碍系统（核心修改部分）
-// ============================================================
-
-// 获取某层所有活跃障碍的占用格子（可跳过某个障碍用于自身移动判定）
 void CPathPlanningDlg::GetOccupiedSet(int floor, set<pair<int, int>>& occupied, const DynObstacle* skip)
 {
     occupied.clear();
@@ -967,43 +954,34 @@ void CPathPlanningDlg::StepDynamic()
         for (auto& ob : m_dynObs) {
             if (ob.floor != f || !ob.active) continue;
 
-            // 移动前先把自己从占用集中移除
             occupied.erase({ ob.pos.x, ob.pos.y });
 
             if (ob.type == DYN_DFS_TO_ELEVATOR && (int)ob.path.size() >= 2) {
-                // DFS型：沿路径前进
                 if (ob.idx + 1 < (int)ob.path.size()) {
                     Point nextP = ob.path[ob.idx + 1];
-                    // 检查下一格是否被其他障碍占用，尽量避开
                     if (!occupied.count({ nextP.x, nextP.y })) {
                         ob.idx++;
                         ob.pos = nextP;
                     }
                     else {
-                        // 无法避开：直接掠过（不停止，继续走）
                         ob.idx++;
                         ob.pos = nextP;
                     }
                 }
                 else {
-                    // 到达电梯 → 消失，立即重生
                     ob.active = false;
                 }
             }
             else {
-                // 随机游走型
                 RandomWalkStep(ob, occupied);
             }
 
-            // 移动后把新位置加入占用集
             if (ob.active)
                 occupied.insert({ ob.pos.x, ob.pos.y });
         }
     }
 
-    // === 即时重生：检查每层活跃障碍数，不足则立即补满 ===
     for (int f = 0; f < m_nFloors; f++) {
-        // 统计本层活跃数和非活跃的槽位
         vector<DynObstacle*> inactiveSlots;
         int activeCount = 0;
         for (auto& ob : m_dynObs) {
@@ -1011,7 +989,6 @@ void CPathPlanningDlg::StepDynamic()
             if (ob.active) activeCount++;
             else inactiveSlots.push_back(&ob);
         }
-        // 补到4个
         for (auto slot : inactiveSlots) {
             if (activeCount >= DYN_PER_FLOOR) break;
             SpawnOneDynamic(*slot);
@@ -1019,10 +996,6 @@ void CPathPlanningDlg::StepDynamic()
         }
     }
 }
-
-// ============================================================
-// 机器人避障与移动（核心修改：距离判定）
-// ============================================================
 
 // 计算两点间路径距离（BFS求最短路径长度），返回-1表示不可达
 int CPathPlanningDlg::PathDistance(int floor, Point a, Point b, const set<pair<int, int>>& blocked)
@@ -1221,9 +1194,7 @@ void CPathPlanningDlg::StepRobot()
     }
 }
 
-// ============================================================
 // 加速按钮
-// ============================================================
 void CPathPlanningDlg::OnBnClickedBtnAccelerate()
 {
     const int MIN_SPEED = 30;
